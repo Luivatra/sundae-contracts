@@ -4,16 +4,16 @@ use aiken/collection/pairs
 use aiken/crypto.{ScriptHash}
 use aiken/interval
 use aiken/primitive/bytearray
-use calculation/process.{pool_input_to_state, process_orders}
+use calculation/process.{find_pool_output, pool_input_to_state, process_orders}
 use cardano/address.{Address, Inline, Script}
-use cardano/assets.{AssetName, PolicyId, Value, ada_policy_id}
+use cardano/assets.{PolicyId, Value}
 use cardano/script_context.{ScriptContext}
 use cardano/transaction.{
   InlineDatum, Input, Output, OutputReference, Transaction, Withdraw,
 }
 use shared.{
-  AssetClass, Ident, count_orders, own_input_index, pool_lp_name, pool_nft_name,
-  spent_output,
+  AssetClass, Ident, count_orders, has_expected_pool_value, own_input_index,
+  pool_lp_name, spent_output,
 }
 use sundae/multisig
 use types/pool.{
@@ -105,6 +105,8 @@ validator pool(
             bid_fees_per_10_thousand: actual_bid_fees_per_10_thousand,
             ask_fees_per_10_thousand: actual_ask_fees_per_10_thousand,
             market_open: actual_market_open,
+            condition: actual_condition,
+            condition_datum: actual_condition_datum,
             ..
           },
         ) = find_pool_output(outputs)
@@ -169,6 +171,7 @@ validator pool(
           final_lp,
           simple_count,
           strategy_count,
+          withdrawal_only,
         <-
           process_orders(
             actual_identifier,
@@ -214,6 +217,8 @@ validator pool(
             0,
             // The accumulated count of "simple" orders, for calculating the fee; set to 0 to start, but incremented in each recursion
             0,
+            // Flag that turns False as soon as we encounter a non withdrawal
+            True,
           )
         // The accumulated count of "strategy" orders, see line above.
         // We need to make sure that the number of orders matches the amount that we processed
@@ -252,6 +257,19 @@ validator pool(
               scooper_sig == scooper
             }
             _ -> True
+          }
+
+        expect
+          when actual_condition is {
+            Some(condition_script) ->
+              if !withdrawal_only {
+                expect Some(..) =
+                  pairs.get_first(withdrawals, address.Script(condition_script))
+                True
+              } else {
+                True
+              }
+            None -> True
           }
 
         // the market must have opened; this allows projects to pre-create their pool, potentially across multiple protocols, and allows
@@ -293,6 +311,8 @@ validator pool(
 
         // And make sure each of these fields is unchanged
         and {
+          datum.condition == actual_condition,
+          datum.condition_datum == actual_condition_datum,
           datum.identifier == actual_identifier,
           datum.assets == actual_assets,
           datum.bid_fees_per_10_thousand == actual_bid_fees_per_10_thousand,
@@ -560,18 +580,6 @@ validator pool(
   }
 }
 
-fn find_pool_output(outputs: List<Output>) -> (Output, PoolDatum) {
-  // Find the pool output; we can assume the pool output is the first output, because:
-  // - The ledger doesn't reorder outputs, just inputs
-  // - We check that the address is correct, so if the first output was to a different contract, we would fail
-  // - We check that the datum is the correct type, meaning we can't construct an invalid pool output
-  // - Later, we check that the pool output has the correct value, meaning it *must* contain the pool token, so we can't pay to the pool script multiple times
-  expect Some(pool_output) = list.head(outputs)
-  expect InlineDatum(output_datum) = pool_output.datum
-  expect output_datum: PoolDatum = output_datum
-  (pool_output, output_datum)
-}
-
 /// This is responsible for checking that the minting value on the transaction is valid
 /// based on the pool state, the policy ID, and the initial incoming datum.
 fn minted_correct_pool_tokens(
@@ -595,88 +603,6 @@ fn minted_correct_pool_tokens(
     dict.to_pairs(minted_tokens) == [
       Pair(pool_lp_name(datum.identifier), quantity_lp - datum.circulating_lp),
     ]
-  }
-}
-
-/// Check that the UTXO contents are correct given a specific pool outcome
-/// In particular, it must have the final A reserves, the final B reserves, the pool NFT, and the protocol fees
-pub fn has_expected_pool_value(
-  pool_script_hash: PolicyId,
-  identifier: Ident,
-  output_value: Value,
-  pool_policy_a: PolicyId,
-  pool_asset_name_a: AssetName,
-  pool_quantity_a: Int,
-  pool_policy_b: PolicyId,
-  pool_asset_name_b: AssetName,
-  pool_quantity_b: Int,
-  final_lp: Int,
-  final_protocol_fees: Int,
-) -> Bool {
-  // Asset A *could* be ADA; in which case there should be 3 tokens on the output
-  // (ADA, Asset B, and the NFT)
-  if pool_policy_a == ada_policy_id {
-    let actual =
-      list.foldl(
-        assets.flatten(output_value),
-        // (token count, lovelace amount, token b amount, pool nft amount)
-        (0, 0, 0, 0),
-        fn(asset, acc) {
-          let token_count = acc.1st + 1
-          if asset.1st == pool_policy_a {
-            (token_count, acc.2nd + asset.3rd, acc.3rd, acc.4th)
-          } else if asset.1st == pool_policy_b && asset.2nd == pool_asset_name_b {
-            (token_count, acc.2nd, acc.3rd + asset.3rd, acc.4th)
-          } else {
-            expect asset == (pool_script_hash, pool_nft_name(identifier), 1)
-            (token_count, acc.2nd, acc.3rd, acc.4th + 1)
-          }
-        },
-      )
-    // If we're withdrawing the last bit of liquidity, we just have ADA and the pool token
-    let expected =
-      if final_lp == 0 {
-        expect pool_quantity_a == 0
-        expect pool_quantity_b == 0
-        (2, final_protocol_fees, 0, 1)
-      } else {
-        (3, final_protocol_fees + pool_quantity_a, pool_quantity_b, 1)
-      }
-    // Rather than constructing a value directly (which can be expensive)
-    // we can just compare the expected token count and amounts with a single pass over the value
-    expected == actual
-  } else {
-    // Asset A isn't ADA, Asset B will *never* be ADA; in this case, there should be 4 tokens on the output:
-    // ADA, the Pool NFT, Asset A, and Asset B
-    let actual =
-      list.foldl(
-        assets.flatten(output_value),
-        // (token count, lovelace amount, token a amount, token b amount, pool nft amount)
-        (0, 0, 0, 0, 0),
-        fn(asset, acc) {
-          let token_count = acc.1st + 1
-          if asset.1st == ada_policy_id {
-            (token_count, acc.2nd + asset.3rd, acc.3rd, acc.4th, acc.5th)
-          } else if asset.1st == pool_policy_a && asset.2nd == pool_asset_name_a {
-            (token_count, acc.2nd, acc.3rd + asset.3rd, acc.4th, acc.5th)
-          } else if asset.1st == pool_policy_b && asset.2nd == pool_asset_name_b {
-            (token_count, acc.2nd, acc.3rd, acc.4th + asset.3rd, acc.5th)
-          } else {
-            expect asset == (pool_script_hash, pool_nft_name(identifier), 1)
-            (token_count, acc.2nd, acc.3rd, acc.4th, acc.5th + 1)
-          }
-        },
-      )
-    // If we're withdrawing the last bit of liquidity, we just have ADA and the pool token
-    let expected =
-      if final_lp == 0 {
-        expect pool_quantity_a == 0
-        expect pool_quantity_b == 0
-        (2, final_protocol_fees, 0, 0, 1)
-      } else {
-        (4, final_protocol_fees, pool_quantity_a, pool_quantity_b, 1)
-      }
-    expected == actual
   }
 }
 
