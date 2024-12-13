@@ -54,6 +54,7 @@ type ScoopTestOptions {
   edit_withdrawals: Option<Pairs<Credential, Int>>,
   edit_pool_input_address: Option<Address>,
   edit_pool_input_value: Option<Value>,
+  edit_pool_input_datum: Option<PoolDatum>,
   edit_pool_output_address: Option<Address>,
   edit_pool_output_value: Option<Value>,
   edit_pool_output_datum: Option<PoolDatum>,
@@ -77,6 +78,7 @@ fn default_scoop_test_options() -> ScoopTestOptions {
     edit_withdrawals: None,
     edit_pool_input_address: None,
     edit_pool_input_value: None,
+    edit_pool_input_datum: None,
     edit_pool_output_address: None,
     edit_pool_output_value: None,
     edit_pool_output_datum: None,
@@ -115,6 +117,46 @@ test ok_scoop_swap_with_over_rounding() {
   let pool_nft_name = shared.pool_nft_name(constants.pool_ident)
   let amt_1 = 408_367_450
   let amt_2 = 425_387_016
+  let pool_datum =
+    PoolDatum {
+      identifier: constants.pool_ident,
+      assets: (
+        (ada_policy_id, ada_asset_name),
+        (constants.rberry_policy, constants.rberry_asset_name),
+      ),
+      circulating_lp: 1_000_000_000,
+      bid_fees_per_10_thousand: 5,
+      ask_fees_per_10_thousand: 5,
+      fee_manager: None,
+      market_open: 0,
+      protocol_fees: 2_000_000,
+      condition: None,
+      condition_datum: None,
+      virtual_balance: (20_000_000_000, 50),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
+    }
+  let pool_out_datum =
+    PoolDatum {
+      identifier: constants.pool_ident,
+      assets: (
+        (ada_policy_id, ada_asset_name),
+        (constants.rberry_policy, constants.rberry_asset_name),
+      ),
+      circulating_lp: 1_000_000_000,
+      bid_fees_per_10_thousand: 5,
+      ask_fees_per_10_thousand: 5,
+      fee_manager: None,
+      market_open: 0,
+      protocol_fees: 7_000_000,
+      condition: None,
+      condition_datum: None,
+      virtual_balance: (amt_1 + amt_2 + 20_000_000_000, 48),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
+    }
   let options =
     ScoopTestOptions {
       ..default_scoop_test_options(),
@@ -123,6 +165,7 @@ test ok_scoop_swap_with_over_rounding() {
           |> assets.add(constants.rberry_policy, constants.rberry_asset_name, 50)
           |> assets.add(constants.pool_script_hash, pool_nft_name, 1),
       ),
+      edit_pool_input_datum: Some(pool_datum),
       edit_pool_output_value: Some(
         assets.from_lovelace(
           amt_1 + amt_2 + 20_000_000_000 + 2_000_000 + 2_500_000 + 2_500_000,
@@ -130,6 +173,7 @@ test ok_scoop_swap_with_over_rounding() {
           |> assets.add(constants.rberry_policy, constants.rberry_asset_name, 48)
           |> assets.add(constants.pool_script_hash, pool_nft_name, 1),
       ),
+      edit_pool_output_datum: Some(pool_out_datum),
       edit_order_1_details: Some(
         Swap(
           (ada_policy_id, ada_asset_name, 799_000_000),
@@ -203,6 +247,29 @@ test pool_validator_ignores_fee() {
 test scoop_high_swap_fees() {
   let pool_nft_name = shared.pool_nft_name(constants.pool_ident)
   let swap_fee = 100
+  let pool_out_datum =
+    PoolDatum {
+      identifier: constants.pool_ident,
+      assets: (
+        (ada_policy_id, ada_asset_name),
+        (constants.rberry_policy, constants.rberry_asset_name),
+      ),
+      circulating_lp: 1_000_000_000,
+      bid_fees_per_10_thousand: swap_fee,
+      ask_fees_per_10_thousand: swap_fee,
+      fee_manager: None,
+      market_open: 0,
+      protocol_fees: 7_000_000,
+      condition: None,
+      condition_datum: None,
+      virtual_balance: (
+        1_000_000_000 + 20_000_000,
+        1_000_000_000 - ( 9_802_950 + 9_611_678 ),
+      ),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
+    }
   let options =
     ScoopTestOptions {
       ..default_scoop_test_options(),
@@ -232,6 +299,7 @@ test scoop_high_swap_fees() {
             )
           |> assets.add(constants.pool_script_hash, pool_nft_name, 1),
       ),
+      edit_pool_output_datum: Some(pool_out_datum),
     }
   scoop(options)
 }
@@ -330,37 +398,54 @@ fn scoop(options: ScoopTestOptions) {
   let owner = multisig.Signature(constants.payment_key)
   let fees = option.or_else(options.edit_swap_fees, (5, 5))
   let pool_datum =
-    PoolDatum {
-      identifier: constants.pool_ident,
-      assets: (
-        (ada_policy_id, ada_asset_name),
-        (constants.rberry_policy, constants.rberry_asset_name),
-      ),
-      circulating_lp: 1_000_000_000,
-      bid_fees_per_10_thousand: fees.1st,
-      ask_fees_per_10_thousand: fees.2nd,
-      fee_manager: None,
-      market_open: 0,
-      protocol_fees: 2_000_000,
-      condition: None,
-      condition_datum: None,
-    }
+    option.or_else(
+      options.edit_pool_input_datum,
+      PoolDatum {
+        identifier: constants.pool_ident,
+        assets: (
+          (ada_policy_id, ada_asset_name),
+          (constants.rberry_policy, constants.rberry_asset_name),
+        ),
+        circulating_lp: 1_000_000_000,
+        bid_fees_per_10_thousand: fees.1st,
+        ask_fees_per_10_thousand: fees.2nd,
+        fee_manager: None,
+        market_open: 0,
+        protocol_fees: 2_000_000,
+        condition: None,
+        condition_datum: None,
+        virtual_balance: (1_000_000_000, 1_000_000_000),
+        liquidation_ratio: (0, 0),
+        maximum_debt_ratio: (0, 0),
+        allowed_leverage: [],
+      },
+    )
   let pool_out_datum =
-    PoolDatum {
-      identifier: constants.pool_ident,
-      assets: (
-        (ada_policy_id, ada_asset_name),
-        (constants.rberry_policy, constants.rberry_asset_name),
-      ),
-      circulating_lp: 1_000_000_000,
-      bid_fees_per_10_thousand: fees.1st,
-      ask_fees_per_10_thousand: fees.2nd,
-      fee_manager: None,
-      market_open: 0,
-      protocol_fees: 7_000_000,
-      condition: None,
-      condition_datum: None,
-    }
+    option.or_else(
+      options.edit_pool_output_datum,
+      PoolDatum {
+        identifier: constants.pool_ident,
+        assets: (
+          (ada_policy_id, ada_asset_name),
+          (constants.rberry_policy, constants.rberry_asset_name),
+        ),
+        circulating_lp: 1_000_000_000,
+        bid_fees_per_10_thousand: fees.1st,
+        ask_fees_per_10_thousand: fees.2nd,
+        fee_manager: None,
+        market_open: 0,
+        protocol_fees: 7_000_000,
+        condition: None,
+        condition_datum: None,
+        virtual_balance: (
+          1_000_000_000 + 20_000_000,
+          1_000_000_000 - ( 9_896_088 + 9_702_095 ),
+        ),
+        liquidation_ratio: (0, 0),
+        maximum_debt_ratio: (0, 0),
+        allowed_leverage: [],
+      },
+    )
   let pool_nft_name = shared.pool_nft_name(constants.pool_ident)
   let pool_address = script_address(constants.pool_script_hash)
   let pool_input =
@@ -560,6 +645,10 @@ fn scoop_swap_deposit(options: ScoopTestOptions) {
       protocol_fees: 2_000_000,
       condition: None,
       condition_datum: None,
+      virtual_balance: (1_000_000_000, 1_000_000_000),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
     }
   let pool_out_datum =
     PoolDatum {
@@ -576,6 +665,13 @@ fn scoop_swap_deposit(options: ScoopTestOptions) {
       protocol_fees: 7_000_000,
       condition: None,
       condition_datum: None,
+      virtual_balance: (
+        1_000_000_000 + 20_000_000,
+        1_000_000_000 - 9_896_088 + 10_000_000 - 196_990,
+      ),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
     }
   let pool_nft_name = shared.pool_nft_name(constants.pool_ident)
   let pool_address = script_address(constants.pool_script_hash)
@@ -791,6 +887,10 @@ fn withdraw_fees_transaction(
       protocol_fees,
       condition: None,
       condition_datum: None,
+      virtual_balance: (0, 0),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
     }
   let normal_input =
     new_tx_input(
@@ -1038,6 +1138,10 @@ fn update_pool_fees_transaction(options: ScoopTestOptions) {
       protocol_fees: 2_000_000,
       condition: None,
       condition_datum: None,
+      virtual_balance: (0, 0),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
     }
   let pool_rider = 2_000_000
   // pool_test_tx_input deduplicate?
@@ -1245,6 +1349,10 @@ fn mint_test_modify(
           protocol_fees: 2_000_000,
           condition: None,
           condition_datum: None,
+          virtual_balance: (0, 0),
+          liquidation_ratio: (0, 0),
+          maximum_debt_ratio: (0, 0),
+          allowed_leverage: [],
         },
       ),
     )
@@ -1531,6 +1639,10 @@ fn evaporate_pool_tx(options: ScoopTestOptions, withdraw_amount: Int) {
       protocol_fees: 18_000_000,
       condition: None,
       condition_datum: None,
+      virtual_balance: (0, 0),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
     }
   // pool_test_tx_input deduplicate?
   let pool_input =
@@ -1616,6 +1728,10 @@ test attempt_evaporate_pool_test() {
       protocol_fees: 18_000_000,
       condition: None,
       condition_datum: None,
+      virtual_balance: (0, 0),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
     }
   // pool_test_tx_input deduplicate?
   let pool_input =
@@ -1687,6 +1803,10 @@ test burn_pool() {
       protocol_fees: 2_000_000,
       condition: None,
       condition_datum: None,
+      virtual_balance: (0, 0),
+      liquidation_ratio: (0, 0),
+      maximum_debt_ratio: (0, 0),
+      allowed_leverage: [],
     }
   let pool_nft_name = shared.pool_nft_name(constants.pool_ident)
   let pool_address = script_address(constants.pool_script_hash)

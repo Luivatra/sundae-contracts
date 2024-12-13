@@ -22,6 +22,10 @@ fn mk_pool_datum() -> PoolDatum {
     protocol_fees: 10000000,
     condition: None,
     condition_datum: None,
+    virtual_balance: (0, 0),
+    liquidation_ratio: (0, 0),
+    maximum_debt_ratio: (0, 0),
+    allowed_leverage: [],
   }
 }
 

@@ -3,6 +3,16 @@ use shared.{AssetClass, Ident}
 use sundae/multisig
 use types/order.{SignedStrategyExecution}
 
+//Rational is opaque so in datum we use num, denom pair
+pub type RationalRaw =
+  (Int, Int)
+
+pub type LeverageSettings {
+  leverage: RationalRaw,
+  interest_rate: RationalRaw,
+  minimum_collateral: RationalRaw,
+}
+
 /// The current state of a AMM liquidity pool at a UTXO.
 pub type PoolDatum {
   /// the unique identifier of the pool. Produced by hashing one of the input UTXOs used to produce the pool
@@ -34,6 +44,10 @@ pub type PoolDatum {
   protocol_fees: Int,
   condition: Option<ScriptHash>,
   condition_datum: Option<Data>,
+  virtual_balance: (Int, Int),
+  liquidation_ratio: RationalRaw,
+  maximum_debt_ratio: RationalRaw,
+  allowed_leverage: List<LeverageSettings>,
 }
 
 /// A pool UTXO can be spent for two purposes:

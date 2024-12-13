@@ -40,6 +40,8 @@ pub fn pool_input_to_state(
     Int,
     Int,
     Int,
+    Int,
+    Int,
   ) ->
     Bool,
 ) -> Bool {
@@ -50,11 +52,13 @@ pub fn pool_input_to_state(
     circulating_lp,
     bid_fees_per_10_thousand,
     ask_fees_per_10_thousand,
+    virtual_balance,
     ..
   } = datum
   let (asset_a, asset_b) = assets
   let (asset_a_policy_id, asset_a_name) = asset_a
   let (asset_b_policy_id, asset_b_name) = asset_b
+  let (virtual_quantity_a, virtual_quantity_b) = virtual_balance
   // If asset_a is ADA, then we need to not consider the protocol fees as part of this
   // We don't have to check asset_b, because assets are guaranteed to be in lexicographical order.
   let min_utxo =
@@ -85,6 +89,8 @@ pub fn pool_input_to_state(
     bid_fees,
     ask_fees,
     protocol_fees,
+    virtual_quantity_a,
+    virtual_quantity_b,
   )
 }
 
@@ -142,8 +148,10 @@ pub fn process_order(
   // A list of outputs, so we can destructure the next output
   // TODO: we can probably avoid returning the outputs, and just return a boolean
   outputs: List<Output>,
+  virtual_quantity_a: Int,
+  virtual_quantity_b: Int,
   // A continuation to call with the next pool state and the list of outputs; this is more efficient than constructing an object and tuples
-  continuation: fn(Int, Int, Int, List<Output>, Bool) -> Bool,
+  continuation: fn(Int, Int, Int, List<Output>, Bool, Int, Int) -> Bool,
 ) -> Bool {
   // Returns the updated pool state, the correct list of outputs to resume from, and total fee charged by the order
   when details is {
@@ -186,6 +194,8 @@ pub fn process_order(
         strategy_fee,
         strategy_fee,
         outputs,
+        virtual_quantity_a,
+        virtual_quantity_b,
         continuation,
       )
     }
@@ -196,16 +206,16 @@ pub fn process_order(
       expect max_protocol_fee >= fee
       // Calculate the result of the swap itself, according to the AMM formula, and validate it against the output
       let
-        new_pool_a,
-        new_pool_b,
+        new_virtual_a,
+        new_virtual_b,
       <-
         swap.do_swap(
           pool_policy_a,
           pool_asset_name_a,
-          pool_quantity_a,
+          virtual_quantity_a,
           pool_policy_b,
           pool_asset_name_b,
-          pool_quantity_b,
+          virtual_quantity_b,
           input,
           destination,
           bid_fees_per_10_thousand,
@@ -216,11 +226,13 @@ pub fn process_order(
           output,
         )
       continuation(
-        new_pool_a,
-        new_pool_b,
+        pool_quantity_a + ( new_virtual_a - virtual_quantity_a ),
+        pool_quantity_b + ( new_virtual_b - virtual_quantity_b ),
         pool_quantity_lp,
         rest_outputs,
         False,
+        new_virtual_a,
+        new_virtual_b,
       )
     }
     order.Deposit(assets) -> {
@@ -231,17 +243,17 @@ pub fn process_order(
       expect max_protocol_fee >= fee
       // Calculate and validate the result of a deposit
       let
-        new_a,
-        new_b,
+        new_virtual_a,
+        new_virtual_b,
         new_lp,
       <-
         deposit.do_deposit(
           pool_policy_a,
           pool_asset_name_a,
-          pool_quantity_a,
+          virtual_quantity_a,
           pool_policy_b,
           pool_asset_name_b,
-          pool_quantity_b,
+          virtual_quantity_b,
           pool_policy_lp,
           pool_asset_name_lp,
           pool_quantity_lp,
@@ -251,7 +263,15 @@ pub fn process_order(
           fee,
           output,
         )
-      continuation(new_a, new_b, new_lp, rest_outputs, False)
+      continuation(
+        pool_quantity_a + ( new_virtual_a - virtual_quantity_a ),
+        pool_quantity_b + ( new_virtual_b - virtual_quantity_b ),
+        new_lp,
+        rest_outputs,
+        False,
+        new_virtual_a,
+        new_virtual_b,
+      )
     }
     order.Withdrawal(amount) -> {
       expect [output, ..rest_outputs] = outputs
@@ -261,8 +281,8 @@ pub fn process_order(
       expect max_protocol_fee >= fee
       // Calculate and validate the result of a withdrawal
       let
-        new_a,
-        new_b,
+        new_virtual_a,
+        new_virtual_b,
         new_lp,
       <-
         withdrawal.do_withdrawal(
@@ -281,7 +301,15 @@ pub fn process_order(
           fee,
           output,
         )
-      continuation(new_a, new_b, new_lp, rest_outputs, True)
+      continuation(
+        pool_quantity_a + ( new_virtual_a - virtual_quantity_a ),
+        pool_quantity_b + ( new_virtual_b - virtual_quantity_b ),
+        new_lp,
+        rest_outputs,
+        True,
+        new_virtual_a,
+        new_virtual_b,
+      )
     }
     // NOTE: we decided not to implement zap, for time constraints, and because a zap can be easily implemented as a chained order, as it is in V1
     // The cheaper fees the DAO voted on should make this acceptable
@@ -294,17 +322,17 @@ pub fn process_order(
       expect max_protocol_fee >= fee
       // Calculate and validate the result of a donation
       let
-        new_a,
-        new_b,
+        new_virtual_a,
+        new_virtual_b,
         used_output,
       <-
         donation.do_donation(
           pool_policy_a,
           pool_asset_name_a,
-          pool_quantity_a,
+          virtual_quantity_a,
           pool_policy_b,
           pool_asset_name_b,
-          pool_quantity_b,
+          virtual_quantity_b,
           input,
           assets,
           destination,
@@ -315,9 +343,25 @@ pub fn process_order(
       // so we can skip over it
       // TODO: can we just return used_output here instead of passing around the lists of outputs?
       if used_output {
-        continuation(new_a, new_b, pool_quantity_lp, rest_outputs, False)
+        continuation(
+          pool_quantity_a + ( new_virtual_a - virtual_quantity_a ),
+          pool_quantity_b + ( new_virtual_b - virtual_quantity_b ),
+          pool_quantity_lp,
+          rest_outputs,
+          False,
+          new_virtual_a,
+          new_virtual_b,
+        )
       } else {
-        continuation(new_a, new_b, pool_quantity_lp, outputs, False)
+        continuation(
+          pool_quantity_a + ( new_virtual_a - virtual_quantity_a ),
+          pool_quantity_b + ( new_virtual_b - virtual_quantity_b ),
+          pool_quantity_lp,
+          outputs,
+          False,
+          new_virtual_a,
+          new_virtual_b,
+        )
       }
     }
     order.Record(policy) -> {
@@ -332,6 +376,8 @@ pub fn process_order(
         pool_quantity_lp,
         rest_outputs,
         False,
+        virtual_quantity_a,
+        virtual_quantity_b,
       )
     }
   }
@@ -382,8 +428,10 @@ pub fn process_orders(
   simple_count: Int,
   strategy_count: Int,
   withdrawal_only: Bool,
+  virtual_quantity_a: Int,
+  virtual_quantity_b: Int,
   // A continuation to call with the final pool state; more efficient than constructing tuples / objects
-  continuation: fn(Int, Int, Int, Int, Int, Bool) -> Bool,
+  continuation: fn(Int, Int, Int, Int, Int, Bool, Int, Int) -> Bool,
 ) -> Bool {
   // Returns the final pool state, and the count of each order type
   // The main "pump" of the recursive loop is the input_order, which is a set of indices into the inputs list
@@ -398,6 +446,8 @@ pub fn process_orders(
         simple_count,
         strategy_count,
         withdrawal_only,
+        virtual_quantity_a,
+        virtual_quantity_b,
       )
     [(idx, sse, _), ..rest] -> {
       // First, it's important to check that each order is processed only once;
@@ -450,6 +500,8 @@ pub fn process_orders(
         new_lp,
         next_orders,
         new_withdrawal_only,
+        new_virtual_a,
+        new_virtual_b,
       <-
         process_order(
           pool_policy_a,
@@ -476,6 +528,8 @@ pub fn process_orders(
           simple_fee,
           strategy_fee,
           outputs,
+          virtual_quantity_a,
+          virtual_quantity_b,
         )
 
       // And recursively process the rest of the orders
@@ -510,6 +564,8 @@ pub fn process_orders(
         next_simple_count,
         next_strategy_count,
         new_withdrawal_only && withdrawal_only,
+        new_virtual_a,
+        new_virtual_b,
         continuation,
       )
     }
@@ -601,6 +657,8 @@ test process_orders_test() {
     simple,
     strategies,
     withdrawal_only,
+    new_virtual_a,
+    new_virtual_b,
   <-
     process_orders(
       #"",
@@ -630,10 +688,14 @@ test process_orders_test() {
       0,
       0,
       True,
+      1_000_000_000,
+      1_000_000_000,
     )
 
   expect new_a == 1_001_000_000
+  expect new_virtual_a == 1_001_000_000
   expect new_b == 1_001_000_000
+  expect new_virtual_b == 1_001_000_000
   expect new_lp == 1_000_000_000
   expect simple == 1
   expect strategies == 0
@@ -739,6 +801,8 @@ test process_30_shuffled_orders_test() {
     simple,
     strategies,
     withdrawal_only,
+    new_virtual_a,
+    new_virtual_b,
   <-
     process_orders(
       #"",
@@ -768,9 +832,11 @@ test process_30_shuffled_orders_test() {
       0,
       0,
       True,
+      1_000_000_000,
+      1_000_000_000,
     )
 
-  new_a == 1_030_000_000 && new_b == 1_030_000_000 && new_lp == 1_000_000_000 && simple == 30 && strategies == 0 && !withdrawal_only
+  new_a == 1_030_000_000 && new_virtual_a == 1_030_000_000 && new_b == 1_030_000_000 && new_virtual_b == 1_030_000_000 && new_lp == 1_000_000_000 && simple == 30 && strategies == 0 && !withdrawal_only
 }
 
 pub fn find_pool_output(outputs: List<Output>) -> (Output, PoolDatum) {

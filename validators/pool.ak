@@ -107,9 +107,15 @@ validator pool(
             market_open: actual_market_open,
             condition: actual_condition,
             condition_datum: actual_condition_datum,
+            virtual_balance: actual_virtual_balance,
+            liquidation_ratio: actual_liquidation_ratio,
+            maximum_debt_ratio: actual_maximum_debt_ratio,
+            allowed_leverage: actual_allowed_leverage,
             ..
           },
         ) = find_pool_output(outputs)
+
+        let (actual_virtual_a, actual_virtual_b) = actual_virtual_balance
 
         // Ensure that the pool output is to the same payment credential; This is critical, because it ensures that the pool NFT
         // or liquidity aren't paid to some other script in control of an attacker.
@@ -160,6 +166,8 @@ validator pool(
           bid_fees,
           ask_fees,
           initial_protocol_fees,
+          virtual_quantity_a,
+          virtual_quantity_b,
         <- pool_input_to_state(pool_script_hash, datum, pool_input)
 
         // Process the orders in order, and decide the final pool state we should see
@@ -172,6 +180,8 @@ validator pool(
           simple_count,
           strategy_count,
           withdrawal_only,
+          final_virtual_a,
+          final_virtual_b,
         <-
           process_orders(
             actual_identifier,
@@ -219,6 +229,8 @@ validator pool(
             0,
             // Flag that turns False as soon as we encounter a non withdrawal
             True,
+            virtual_quantity_a,
+            virtual_quantity_b,
           )
         // The accumulated count of "strategy" orders, see line above.
         // We need to make sure that the number of orders matches the amount that we processed
@@ -309,6 +321,12 @@ validator pool(
         expect
           actual_protocol_fees == initial_protocol_fees + expected_fees_collected
 
+        trace final_virtual_a
+        trace actual_virtual_a
+
+        expect final_virtual_a == actual_virtual_a
+        expect final_virtual_b == actual_virtual_b
+
         // And make sure each of these fields is unchanged
         and {
           datum.condition == actual_condition,
@@ -318,6 +336,10 @@ validator pool(
           datum.bid_fees_per_10_thousand == actual_bid_fees_per_10_thousand,
           datum.ask_fees_per_10_thousand == actual_ask_fees_per_10_thousand,
           datum.market_open == actual_market_open,
+          datum.liquidation_ratio == actual_liquidation_ratio,
+          datum.maximum_debt_ratio == actual_maximum_debt_ratio,
+          datum.allowed_leverage == actual_allowed_leverage,
+          final_virtual_a == actual_virtual_a,
           // Finally, make sure we don't change the stake credential; this can only be done when withdrawing fees, by the treasury administrator
           pool_input.address.stake_credential == pool_output_address.stake_credential,
         }
